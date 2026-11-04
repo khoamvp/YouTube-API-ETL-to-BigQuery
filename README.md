@@ -38,7 +38,37 @@ YouTube Data API v3
 | `etl/load.py` | Load bảng `videos` và MERGE bảng `comments`. |
 | `etl/main.py` | Điều phối toàn bộ quy trình ETL. |
 
-> Đường dẫn trên giả định 5 file nằm trong thư mục `etl/` (như các import trong `main.py`). Nếu `main.py` nằm ở thư mục gốc, thay lệnh chạy cho phù hợp.
+## Project Structure
+
+```text
+youtube-etl/
+├── data/
+│   ├── crawl_state.json             # Lưu tiến độ crawl comments
+│   └── raw/
+│       ├── video_stats.json         # RAW statistics của tất cả video
+│       └── comments/
+│           ├── 30KI5SuECuc/
+│           │   ├── 20261104T142823518918Z.json
+│           │   └── 20261104T143649064749Z.json
+│           ├── 32sYGCOYJUM/
+│           │   └── ...
+│           └── ...                  # Mỗi video có một thư mục riêng
+│
+├── etl/
+│   ├── __init__.py
+│   ├── extract.py                    # Gọi YouTube Data API v3
+│   ├── storage.py                    # Đọc/ghi RAW JSON
+│   ├── transform.py                  # Làm sạch và chuyển đổi dữ liệu
+│   └── load.py                       # Load và MERGE vào BigQuery
+│
+├── logs/
+│   └── cron.log                      # Log chạy tự động
+│
+├── main.py                           # Điều phối ETL pipeline
+├── run_cron.sh                       # Script chạy cron
+├── requirements.txt                  # Python dependencies
+└── README.md                         # Tài liệu project
+```
 
 ## 3. Lấy YouTube API key
 
@@ -53,7 +83,6 @@ API_KEY=YOUR_YOUTUBE_API_KEY
 
 `extract.py` đọc key qua `python-dotenv` và gửi tới API qua HTTP header `x-goog-api-key`. Vì project chỉ đọc dữ liệu **công khai**, không cần OAuth đăng nhập tài khoản kênh.
 
-**Không đưa `.env`, service-account key hoặc thông tin bí mật lên GitHub.**
 
 ## 4. API sử dụng và JSON nhận được
 
@@ -212,68 +241,23 @@ Các trường số lấy từ YouTube API thường có dạng chuỗi (`"12000
 
 Quy trình load comments: **loại trùng trong batch → staging_comments → MERGE UPDATE/INSERT → xóa staging**. Dataset BigQuery cần được tạo trước.
 
-## 7. Cài đặt và chạy
 
-Yêu cầu: **Python 3.10+**, kết nối internet, YouTube API key và quyền sử dụng BigQuery.
 
-```bash
-python -m venv venv
-source venv/bin/activate
-pip install requests python-dotenv google-cloud-bigquery
-```
-
-**BigQuery authentication:** `load.py` dùng Application Default Credentials (ADC). Chạy local có thể dùng `gcloud auth application-default login`; trên Google Cloud VM nên gắn **Service Account** có quyền chạy BigQuery jobs và ghi vào dataset `YoutubeAPI` (đồng thời cấu hình access scopes phù hợp).
-
-Chạy thử từ **thư mục gốc project**:
-
-```bash
-python -m etl.main
-```
-
-Kiểm tra file `data/raw/`, `data/crawl_state.json`, hai bảng `YoutubeAPI.videos` và `YoutubeAPI.comments` trên BigQuery.
-
-## 8. Chạy tự động bằng cron (Google Cloud VM)
-
-Ví dụ nội dung `run_cron.sh` (thay đường dẫn bằng đường dẫn project/venv thực tế):
+## 7. Chạy tự động bằng cron (Google Cloud VM)
 
 ```bash
 #!/bin/bash
-cd /home/ubuntu/youtube-etl || exit 1
-/home/ubuntu/youtube-etl/venv/bin/python -m etl.main
+
+cd /home/khoa/Downloads/project1 || exit 1
+
+export GOOGLE_APPLICATION_CREDENTIALS="/home/khoa/Downloads/youtubeapi.json"
+
+/home/khoa/Downloads/project1/.venv/bin/python main.py >> logs/cron.log 2>&1
 ```
 
-Cấp quyền và mở cấu hình cron:
-
-```bash
-chmod +x run_cron.sh
-crontab -e
-```
 
 Ví dụ chạy **05:00 mỗi ngày theo timezone của VM** và ghi log:
 
 ```cron
 0 5 * * * /home/ubuntu/youtube-etl/run_cron.sh >> /home/ubuntu/youtube-etl/cron.log 2>&1
 ```
-
-Kiểm tra timezone bằng `date`; nếu VM dùng UTC thì 05:00 UTC tương ứng 12:00 tại Việt Nam. Cron chạy mỗi ngày **một lần lúc 05:00**, không phải chạy liên tục 5 giờ.
-
-## 9. Lưu ý vận hành
-
-- **Quota:** `extract.py` nhận diện `quotaExceeded` / `dailyLimitExceeded`; khi quota hết trong vòng crawl bình luận, chương trình dừng crawl các video còn lại nhưng vẫn có thể load phần đã lấy được.
-- **Checkpoint:** `crawl_state.json` chỉ được ghi sau bước load comments; nếu có lỗi trước khi ghi state, lần chạy sau có thể đọc lại trang cũ. MERGE giúp tránh nhân đôi ID bình luận trong BigQuery.
-- **Bình luận:** chỉ lấy **top-level comments**, không gọi API tải nội dung replies; `totalReplyCount` là số đếm. Cơ chế phân trang theo `order=time` + `page_token` **không bảo đảm thu thập đầy đủ tuyệt đối** nếu danh sách bình luận biến động giữa các lần chạy.
-- **Top 10:** được tính lại mỗi lần chạy, nên tập video crawl có thể thay đổi.
-- **Dữ liệu:** `video_stats.json` được ghi đè; RAW comments và BigQuery comments được tích lũy theo từng lần chạy.
-- **Lỗi HTTP:** timeout 30 giây/request; không có retry tự động. Có log bằng `logging` nhưng chưa có hệ thống cảnh báo riêng.
-- **Chạy đồng thời:** không nên để hai cron job cùng chạy một lúc vì dùng chung state và bảng staging `staging_comments`.
-- **GitHub:** nên thêm `.env`, `venv/`, `__pycache__/`, `cron.log` và file khóa JSON vào `.gitignore`; cân nhắc không commit `data/` nếu dữ liệu lớn.
-
-## 10. Tài liệu tham khảo
-
-- [YouTube Data API v3](https://developers.google.com/youtube/v3/getting-started)
-- [YouTube API authentication](https://developers.google.com/youtube/v3/guides/authentication)
-- [BigQuery authentication (ADC)](https://cloud.google.com/bigquery/docs/authentication)
-
----
-
-**Phạm vi hiện tại:** ETL thống kê video và bình luận gốc từ một kênh YouTube công khai lên BigQuery; không thu thập `shareCount`, nội dung replies hoặc dữ liệu riêng tư của kênh.
