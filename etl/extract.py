@@ -4,16 +4,21 @@ import os
 import requests
 from dotenv import load_dotenv
 import logging
+
 load_dotenv()
 
 API_KEY = os.getenv("API_KEY")
-CHANNEL_HANDLE = "@Sontungmtp"
 BASE_URL = "https://www.googleapis.com/youtube/v3"
 
 PAGES_PER_RUN = 10    
 MAX_TOTAL_PAGES = 50  
-if not API_KEY:
-    raise ValueError("Thiếu API_KEY trong file .env")
+ARTISTS = [
+    {"handle": "@Sontungmtp", "dataset": "SONTUNG"},
+    {"handle": "@mytam", "dataset": "MYTAM"},
+    {"handle": "@DenVau1305", "dataset": "DENVAU"},
+    {"handle": "@j97imjack", "dataset": "JACK"},
+    {"handle": "@HoangThuyLinh1108", "dataset": "HOANGTHUYLINH"}
+]
 
 class QuotaExceeded(Exception):
     pass
@@ -42,16 +47,14 @@ def call_api(endpoint: str, params: dict) -> dict:
 
 
 # 2. Lấy Upload Playlist ID của kênh
-def get_playlistId() -> str:
+def get_playlistId(channel_handle: str) -> str:
     data = call_api("channels", {
         "part": "contentDetails",
-        "forHandle": CHANNEL_HANDLE,
+        "forHandle": channel_handle,
         "fields": "items(contentDetails(relatedPlaylists(uploads)))"
     })
-
     if not data.get("items"):
-        raise ValueError("Không tìm thấy kênh YouTube.")
-
+        raise ValueError(f"Không tìm thấy kênh: {channel_handle}")
     return data["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
 
 
@@ -166,9 +169,11 @@ def crawl_comments(videos: list[dict], state: dict) -> tuple[dict[str, list], di
             logging.warning("Video %s đã tắt bình luận.", vid)
             continue
         except requests.RequestException as e:
-            logging.error("Lỗi video %s: %s", vid, type(e).__name__)
-            if getattr(e.response, "status_code", None) == 400:
-                new_state[vid] = {"page_token": None, "pages": 0}  # token hỏng, chạy lại từ đầu
+            status = e.response.status_code if e.response is not None else "Unknown"
+            detail = e.response.text[:500] if e.response is not None else str(e)
+            logging.error("Lỗi video %s: HTTP %s - %s", vid, status, detail)
+            if status == 400:
+                new_state[vid] = {"page_token": None, "pages": 0}
             continue
 
         raw[vid] = threads
@@ -179,3 +184,4 @@ def crawl_comments(videos: list[dict], state: dict) -> tuple[dict[str, list], di
             new_state[vid] = {"page_token": token, "pages": pages}
             logging.info("Video %s: %s trang, tiến độ %s/%s", vid, fetched, pages, MAX_TOTAL_PAGES)
     return raw, new_state
+

@@ -1,115 +1,133 @@
 # YouTube Data API → BigQuery ETL
 
-Pipeline Python thu thập thống kê video và bình luận công khai từ kênh YouTube, lưu dữ liệu gốc dạng JSON, chuyển đổi và nạp vào **Google BigQuery**. Thiết kế để chạy định kỳ trên Google Cloud VM bằng **cron**.
+Pipeline Python thu thập **thống kê video** và **bình luận công khai** của 5 nghệ sĩ Việt Nam qua YouTube Data API v3; lưu RAW JSON trên Linux và BigQuery, sau đó transform để phân tích. Thiết kế chạy định kỳ trên Google Cloud VM bằng **cron**.
 
 ## 1. Tổng quan
 
 ```text
-YouTube Data API v3
-  ├─ channels.list       → Upload playlist ID
-  ├─ playlistItems.list  → Danh sách video ID
-  ├─ videos.list         → Statistics của tất cả video
-  └─ commentThreads.list → Bình luận của Top 10 video (theo views)
-            ↓
-      RAW JSON (local)
-            ↓
-       Transform Python
-            ↓
-       Google BigQuery
-       ├─ videos   (WRITE_TRUNCATE)
-       └─ comments (MERGE theo comment_id)
-            ↑
-   crawl_state.json (checkpoint)
+Cron → main.py → for artist in ARTISTS (5 nghệ sĩ)
+                    |
+                    v
+          YouTube Data API v3
+          ├─ channels.list       → Upload playlist ID
+          ├─ playlistItems.list  → Video IDs
+          ├─ videos.list         → Thống kê toàn bộ video
+          └─ commentThreads.list → Comments của Top 10 video theo views
+                    |
+                    v
+         RAW JSON (local, theo nghệ sĩ)
+                    |
+                    +──────────────→ BigQuery raw_videos / raw_comments
+                    |
+                    v
+             Transform Python
+                    |
+                    v
+          BigQuery videos / comments
+                    |
+                    v
+         Cập nhật crawl_state.json
 ```
 
-- **Kênh hiện tại:** `@Sontungmtp` (đặt trong `extract.py`).
-- **Top K:** `10` video có lượt xem cao nhất (`main.py`).
-- **Video:** lấy tất cả video trong upload playlist và cập nhật lại bảng ở mỗi lần chạy.
-- **Comments:** lấy tối đa `10` trang/video/lần chạy, `100` bình luận/trang; sau `50` trang tích lũy thì bắt đầu lại từ trang đầu. Dữ liệu được MERGE để tránh trùng `comment_id`.
-- **BigQuery:** dataset `YoutubeAPI`, location `asia-southeast1` (Singapore).
+**Danh sách nghệ sĩ** (cấu hình trong `etl/extract.py`):
 
-## 2. Cấu trúc source code
+| Nghệ sĩ | YouTube handle | BigQuery dataset |
+|---|---|---|
+| Sơn Tùng M-TP | `@Sontungmtp` | `SONTUNG` |
+| Mỹ Tâm | `@mytam` | `MYTAM` |
+| Đen Vâu | `@DenVau1305` | `DENVAU` |
+| Jack | `@j97imjack` | `JACK` |
+| Hoàng Thùy Linh | `@HoangThuyLinh1108` | `HOANGTHUYLINH` |
 
-| File | Vai trò |
+> Các handle là cấu hình hiện tại của project; cần kiểm tra lại nếu YouTube đổi handle hoặc kênh không truy cập được.
+
+- `TOP_K = 10`: chọn 10 video nhiều lượt xem nhất **mỗi nghệ sĩ** để crawl comments.
+- `PAGES_PER_RUN = 10`, `maxResults = 100`: tối đa **1.000 bình luận gốc/video/lần chạy**.
+- `MAX_TOTAL_PAGES = 50`: khi đạt 50 trang hoặc hết trang, lần crawl sau bắt đầu lại từ đầu.
+- **Chỉ lấy top-level comments**; có `totalReplyCount` nhưng không lấy nội dung replies.
+- BigQuery location: `asia-southeast1` (Singapore). **5 datasets × 4 bảng = 20 bảng chính**.
+
+## 2. Các thành phần
+
+| File | Nhiệm vụ |
 |---|---|
-| `etl/extract.py` | Gọi YouTube API, phân trang, lấy statistics/comments, quản lý checkpoint trong bộ nhớ. |
-| `etl/storage.py` | Đọc/ghi JSON và ghi file an toàn qua `.tmp` + `os.replace()`. |
-| `etl/transform.py` | Chuẩn hóa dữ liệu thành các cột phục vụ BigQuery. |
-| `etl/load.py` | Load bảng `videos` và MERGE bảng `comments`. |
-| `etl/main.py` | Điều phối toàn bộ quy trình ETL. |
+| `etl/extract.py` | Danh sách nghệ sĩ, gọi API, phân trang và tính checkpoint mới trong bộ nhớ. |
+| `etl/storage.py` | Đọc/ghi RAW JSON và checkpoint trên local (`.tmp` + `os.replace()`). |
+| `etl/transform.py` | Chuyển dữ liệu JSON thành các cột cho BigQuery. |
+| `etl/load.py` | Tạo dataset, load RAW, full refresh videos và MERGE comments. |
+| `main.py` | Điều phối các bước ETL trong `main()` cho lần lượt 5 nghệ sĩ. |
+| `run_cron.sh` | Script chạy tự động trên VM. |
 
-## Project Structure
+## 3. Cấu trúc thư mục
 
 ```text
 youtube-etl/
 ├── data/
-│   ├── crawl_state.json             # Lưu tiến độ crawl comments
-│   └── raw/
-│       ├── video_stats.json         # RAW statistics của tất cả video
-│       └── comments/
-│           ├── 30KI5SuECuc/
-│           │   ├── 20261104T142823518918Z.json
-│           │   └── 20261104T143649064749Z.json
-│           ├── 32sYGCOYJUM/
-│           │   └── ...
-│           └── ...                  # Mỗi video có một thư mục riêng
-│
+│   ├── SONTUNG/
+│   │   ├── crawl_state.json
+│   │   └── raw/
+│   │       ├── video_stats.json
+│   │       └── comments/
+│   │           └── <video_id>/
+│   │               ├── 2026-11-05_05-00-00.json
+│   │               └── 2026-11-06_05-00-00.json
+│   ├── MYTAM/
+│   ├── DENVAU/
+│   ├── JACK/
+│   └── HOANGTHUYLINH/
 ├── etl/
 │   ├── __init__.py
-│   ├── extract.py                    # Gọi YouTube Data API v3
-│   ├── storage.py                    # Đọc/ghi RAW JSON
-│   ├── transform.py                  # Làm sạch và chuyển đổi dữ liệu
-│   └── load.py                       # Load và MERGE vào BigQuery
-│
+│   ├── extract.py
+│   ├── storage.py
+│   ├── transform.py
+│   └── load.py
 ├── logs/
-│   └── cron.log                      # Log chạy tự động
-│
-├── main.py                           # Điều phối ETL pipeline
-├── run_cron.sh                       # Script chạy cron
-├── requirements.txt                  # Python dependencies
-└── README.md                         # Tài liệu project
+│   └── cron.log
+├── main.py
+├── run_cron.sh
+├── requirements.txt
+├── .env                  # Không commit
+├── .gitignore
+└── README.md
 ```
 
-## 3. Lấy YouTube API key
+Mỗi nghệ sĩ có **checkpoint và RAW riêng**. Thư mục và file dữ liệu sẽ được tạo khi chạy; `data/`, `logs/`, `.env` và file Service Account **không nên đưa lên GitHub**.
 
-1. Mở [Google Cloud Console](https://console.cloud.google.com/), tạo hoặc chọn **Project**.
-2. Vào **APIs & Services → Library**, tìm **YouTube Data API v3** và chọn **Enable**.
-3. Vào **APIs & Services → Credentials → Create credentials → API key**.
-4. Giới hạn key cho **YouTube Data API v3** nếu phù hợp; lưu key trong file `.env` ở thư mục chạy project:
+## 4. Tạo YouTube API key và cấu hình
+
+1. Truy cập [Google Cloud Console](https://console.cloud.google.com/), tạo/chọn project.
+2. Vào **APIs & Services → Library**, bật **YouTube Data API v3**.
+3. Vào **APIs & Services → Credentials → Create credentials → API key**; nên giới hạn key chỉ dùng cho YouTube Data API v3.
+4. Tạo `.env` tại thư mục gốc project:
 
 ```dotenv
 API_KEY=YOUR_YOUTUBE_API_KEY
 ```
 
-`extract.py` đọc key qua `python-dotenv` và gửi tới API qua HTTP header `x-goog-api-key`. Vì project chỉ đọc dữ liệu **công khai**, không cần OAuth đăng nhập tài khoản kênh.
+`extract.py` đọc key bằng `python-dotenv` và gửi qua header `x-goog-api-key`. Chỉ đọc dữ liệu công khai nên không cần OAuth của chủ kênh. Để load BigQuery, VM cần quyền qua Service Account (gắn vào VM hoặc trỏ đến file JSON key bằng `GOOGLE_APPLICATION_CREDENTIALS`).
 
-
-## 4. API sử dụng và JSON nhận được
+## 5. API và định dạng JSON
 
 Base URL: `https://www.googleapis.com/youtube/v3`
 
-| Endpoint | Tham số chính | Dữ liệu lấy |
+| Endpoint | Mục đích | Trường chính |
 |---|---|---|
-| `channels` | `part=contentDetails`, `forHandle=@Sontungmtp` | `relatedPlaylists.uploads` |
-| `playlistItems` | `part=contentDetails`, `playlistId`, `maxResults=50` | `videoId`, `nextPageToken` |
-| `videos` | `part=snippet,statistics`, tối đa 50 ID/request | `id`, `title`, `publishedAt`, `viewCount`, `likeCount`, `commentCount` |
-| `commentThreads` | `part=snippet`, `videoId`, `maxResults=100`, `order=time` | Top-level comments, `totalReplyCount`, `nextPageToken` |
+| `channels.list` | Tìm upload playlist theo `forHandle` | `relatedPlaylists.uploads` |
+| `playlistItems.list` | Lấy toàn bộ video ID, 50 ID/trang | `videoId`, `nextPageToken` |
+| `videos.list` | Lấy thông tin và thống kê, tối đa 50 ID/request | `id`, `snippet`, `statistics` |
+| `commentThreads.list` | Lấy bình luận gốc, tối đa 100/trang, `order=time` | `items`, `nextPageToken` |
 
-Các ví dụ JSON dưới đây **được rút gọn và dùng dữ liệu minh họa**, đúng cấu trúc field mà code yêu cầu.
-
-**Ví dụ `channels` → upload playlist ID:**
+**Ví dụ response rút gọn** (dữ liệu minh họa):
 
 ```json
 {"items": [{"contentDetails": {"relatedPlaylists": {"uploads": "UUexample123"}}}]}
 ```
 
-**Ví dụ `playlistItems` → video IDs:**
-
 ```json
 {"nextPageToken": "NEXT_TOKEN", "items": [{"contentDetails": {"videoId": "video123"}}]}
 ```
 
-**Ví dụ `videos` → thống kê:**
+**RAW video** — `data/<dataset>/raw/video_stats.json` là một **JSON array**, ghi đè mỗi lần chạy:
 
 ```json
 [
@@ -121,51 +139,7 @@ Các ví dụ JSON dưới đây **được rút gọn và dùng dữ liệu min
 ]
 ```
 
-**Ví dụ `commentThreads` → bình luận gốc:**
-
-```json
-{
-  "nextPageToken": "NEXT_TOKEN",
-  "items": [
-    {
-      "id": "thread123",
-      "snippet": {
-        "videoId": "video123",
-        "totalReplyCount": 2,
-        "topLevelComment": {
-          "id": "comment123",
-          "snippet": {
-            "publishedAt": "2025-01-02T09:00:00Z",
-            "authorDisplayName": "Viewer A",
-            "textDisplay": "Great song!",
-            "likeCount": 10
-          }
-        }
-      }
-    }
-  ]
-}
-```
-
-**Lưu ý:** JSON trên là response minh họa của API. Khi ghi RAW, code lưu `items` (danh sách threads), **không lưu** `nextPageToken` cùng file bình luận; token được quản lý riêng trong state.
-
-## 5. Cấu trúc file dữ liệu
-
-```text
-data/
-├── crawl_state.json
-└── raw/
-    ├── video_stats.json
-    └── comments/
-        └── <video_id>/
-            └── <run_id>.json
-```
-
-- `video_stats.json`: **JSON array** các video, ghi đè mỗi lần chạy.
-- `<video_id>/<run_id>.json`: **JSON object** `{ "video_id": ..., "threads": [...] }`; mỗi lượt chạy tạo file riêng (`run_id` theo UTC), không ghi đè lịch sử bình luận.
-- `crawl_state.json`: **JSON object**, key là video ID, lưu `page_token` và số trang `pages`.
-
-**Ví dụ file RAW comments:**
+**RAW comments** — `data/<dataset>/raw/comments/<video_id>/<run_id>.json` là một **JSON object**; mỗi video có một file cho mỗi lần chạy:
 
 ```json
 {
@@ -191,7 +165,7 @@ data/
 }
 ```
 
-**Ví dụ `crawl_state.json`:**
+**Checkpoint** — `data/<dataset>/crawl_state.json` lưu phân trang riêng từng video:
 
 ```json
 {
@@ -200,64 +174,98 @@ data/
 }
 ```
 
-`page_token: null, pages: 0` nghĩa là lượt tiếp theo sẽ bắt đầu từ trang đầu; trạng thái này xuất hiện khi đã hết trang hoặc đã đạt ngưỡng 50 trang.
+`page_token: null` và `pages: 0` nghĩa là lần tiếp theo bắt đầu từ trang đầu. Token không được lưu chung trong RAW comments. `run_id` là thời điểm chạy theo UTC, ví dụ `2026-11-05_05-00-00`.
 
-## 6. Transform và bảng BigQuery
+## 6. BigQuery: 5 datasets, mỗi dataset 4 bảng
 
-Các trường số lấy từ YouTube API thường có dạng chuỗi (`"1200000"`). `transform.py` chuyển sang số nguyên trước khi load.
-
-**Bảng `YoutubeAPI.videos`** — Full Refresh (`WRITE_TRUNCATE`):
-
-| Column | BigQuery type | Nội dung |
-|---|---|---|
-| `id` | STRING | Video ID |
-| `publishedAt` | TIMESTAMP | Thời điểm đăng video |
-| `title` | STRING | Tên video |
-| `viewCount` | INT64 | Lượt xem |
-| `likeCount` | INT64 | Lượt thích |
-| `commentCount` | INT64 | Tổng số bình luận do YouTube thống kê |
-
-**Bảng `YoutubeAPI.comments`** — MERGE theo `comment_id`:
-
-| Column | BigQuery type | Nội dung |
-|---|---|---|
-| `comment_id` | STRING | ID bình luận gốc |
-| `video_id` | STRING | Video chứa bình luận |
-| `publishedAt` | TIMESTAMP | Thời điểm đăng bình luận |
-| `author` | STRING | Tên người bình luận |
-| `text` | STRING | Nội dung bình luận |
-| `likeCount` | INT64 | Lượt thích bình luận |
-| `totalReplyCount` | INT64 | Số phản hồi được báo cáo |
-
-**Ví dụ record sau transform:**
-
-```json
-{"id": "video123", "publishedAt": "2025-01-01T08:00:00Z", "title": "Example song", "viewCount": 1200000, "likeCount": 25000, "commentCount": 1500}
+```text
+Google Cloud Project
+├── SONTUNG/
+│   ├── raw_videos
+│   ├── raw_comments
+│   ├── videos
+│   └── comments
+├── MYTAM/             (cùng 4 bảng)
+├── DENVAU/            (cùng 4 bảng)
+├── JACK/              (cùng 4 bảng)
+└── HOANGTHUYLINH/     (cùng 4 bảng)
 ```
 
-```json
-{"comment_id": "comment123", "video_id": "video123", "publishedAt": "2025-01-02T09:00:00Z", "author": "Viewer A", "text": "Great song!", "likeCount": 10, "totalReplyCount": 2}
+| Bảng | Schema | Cách cập nhật |
+|---|---|---|
+| `raw_videos` | `run_id STRING`, `raw_data JSON` | **WRITE_TRUNCATE**: chỉ giữ snapshot RAW mới nhất. |
+| `raw_comments` | `run_id STRING`, `video_id STRING`, `raw_data JSON` | **WRITE_APPEND**: mỗi file RAW comments tương ứng một dòng, lưu lịch sử các lần chạy. |
+| `videos` | Các cột statistics đã transform | **WRITE_TRUNCATE**: dữ liệu hiện tại. |
+| `comments` | Các cột comment đã transform | **MERGE** theo `comment_id`: cập nhật cũ, thêm mới. |
+
+**Schema `videos`:**
+
+| Cột | Kiểu |
+|---|---|
+| `id` | STRING |
+| `publishedAt` | TIMESTAMP |
+| `title` | STRING |
+| `viewCount` | INT64 |
+| `likeCount` | INT64 |
+| `commentCount` | INT64 |
+
+**Schema `comments`:**
+
+| Cột | Kiểu |
+|---|---|
+| `comment_id` | STRING |
+| `video_id` | STRING |
+| `publishedAt` | TIMESTAMP |
+| `author` | STRING |
+| `text` | STRING |
+| `likeCount` | INT64 |
+| `totalReplyCount` | INT64 |
+
+`load.py` tạo dataset nếu chưa tồn tại, sau đó load các bảng tương ứng. Comments đã transform được khử trùng trong batch → load vào `staging_comments` → `MERGE` → xóa staging. **RAW comments không khử trùng**; một bình luận có thể xuất hiện ở nhiều lần crawl.
+
+## 7. Cài đặt và chạy
+
+```bash
+cd /home/khoa/Downloads/project1
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python main.py
 ```
 
-Quy trình load comments: **loại trùng trong batch → staging_comments → MERGE UPDATE/INSERT → xóa staging**. Dataset BigQuery cần được tạo trước.
+Cần cấu hình `.env` và xác thực BigQuery trước khi chạy. Kiểm tra kết quả trong `data/<dataset>/` và 4 bảng của mỗi dataset trên BigQuery.
 
+## 8. Chạy tự động bằng cron trên VM
 
-
-## 7. Chạy tự động bằng cron (Google Cloud VM)
+Ví dụ `run_cron.sh` (thay đường dẫn cho đúng máy của bạn):
 
 ```bash
 #!/bin/bash
-
 cd /home/khoa/Downloads/project1 || exit 1
-
+mkdir -p logs
 export GOOGLE_APPLICATION_CREDENTIALS="/home/khoa/Downloads/youtubeapi.json"
-
 /home/khoa/Downloads/project1/.venv/bin/python main.py >> logs/cron.log 2>&1
 ```
 
+Cấp quyền và chạy thử:
 
-Ví dụ chạy **05:00 mỗi ngày theo timezone của VM** và ghi log:
+```bash
+chmod +x run_cron.sh
+./run_cron.sh
+```
+
+Mở `crontab -e` và thêm lịch chạy lúc **05:00 mỗi ngày theo timezone của VM**:
 
 ```cron
-0 5 * * * /home/ubuntu/youtube-etl/run_cron.sh >> /home/ubuntu/youtube-etl/cron.log 2>&1
+0 5 * * * /home/khoa/Downloads/project1/run_cron.sh
 ```
+
+## 9. Lưu ý
+
+- Một cron job xử lý **lần lượt 5 nghệ sĩ**; mỗi nghệ sĩ có dataset, RAW và checkpoint riêng.
+- Checkpoint được lưu **sau khi các bước BigQuery load thành công** cho nghệ sĩ đó.
+- Bình luận có thể bị thiếu hoặc trùng giữa các lần crawl nếu nội dung YouTube thay đổi trong lúc phân trang; bảng `comments` dùng MERGE để giảm trùng theo `comment_id`.
+- `raw_comments` dùng APPEND nên chạy lại có thể tạo thêm batch giống nhau; `raw_videos` ghi đè.
+- Không commit `.env`, Service Account JSON, `data/`, logs và `.venv/` lên GitHub.
+
+**Tài liệu:** [YouTube Data API](https://developers.google.com/youtube/v3/docs) · [BigQuery JSON](https://cloud.google.com/bigquery/docs/json-data) · [BigQuery Python Client](https://cloud.google.com/python/docs/reference/bigquery/latest)
