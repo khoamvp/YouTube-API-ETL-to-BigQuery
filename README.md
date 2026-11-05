@@ -39,7 +39,6 @@ Cron → main.py → for artist in ARTISTS (5 nghệ sĩ)
 | Jack | `@j97imjack` | `JACK` |
 | Hoàng Thùy Linh | `@HoangThuyLinh1108` | `HOANGTHUYLINH` |
 
-> Các handle là cấu hình hiện tại của project; cần kiểm tra lại nếu YouTube đổi handle hoặc kênh không truy cập được.
 
 - `TOP_K = 10`: chọn 10 video nhiều lượt xem nhất **mỗi nghệ sĩ** để crawl comments.
 - `PAGES_PER_RUN = 10`, `maxResults = 100`: tối đa **1.000 bình luận gốc/video/lần chạy**.
@@ -91,14 +90,8 @@ youtube-etl/
 └── README.md
 ```
 
-Mỗi nghệ sĩ có **checkpoint và RAW riêng**. Thư mục và file dữ liệu sẽ được tạo khi chạy; `data/`, `logs/`, `.env` và file Service Account **không nên đưa lên GitHub**.
 
-## 4. Tạo YouTube API key và cấu hình
-
-1. Truy cập [Google Cloud Console](https://console.cloud.google.com/), tạo/chọn project.
-2. Vào **APIs & Services → Library**, bật **YouTube Data API v3**.
-3. Vào **APIs & Services → Credentials → Create credentials → API key**; nên giới hạn key chỉ dùng cho YouTube Data API v3.
-4. Tạo `.env` tại thư mục gốc project:
+## 4. YouTube API key và cấu hình
 
 ```dotenv
 API_KEY=YOUR_YOUTUBE_API_KEY
@@ -233,18 +226,18 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Cần cấu hình `.env` và xác thực BigQuery trước khi chạy. Kiểm tra kết quả trong `data/<dataset>/` và 4 bảng của mỗi dataset trên BigQuery.
-
 ## 8. Chạy tự động bằng cron trên VM
 
-Ví dụ `run_cron.sh` (thay đường dẫn cho đúng máy của bạn):
+
+Tự chạy file run_cron.sh vào 5.00 am và 17.00 pm mỗi ngày
 
 ```bash
 #!/bin/bash
-cd /home/khoa/Downloads/project1 || exit 1
+#!/bin/bash
+cd /home/pmk20060311/YouTube-API-ETL-to-BigQuery || exit 1
+export GOOGLE_APPLICATION_CREDENTIALS="/home/pmk20060311/youtubeapi.json"
 mkdir -p logs
-export GOOGLE_APPLICATION_CREDENTIALS="/home/khoa/Downloads/youtubeapi.json"
-/home/khoa/Downloads/project1/.venv/bin/python main.py >> logs/cron.log 2>&1
+.venv/bin/python main.py >> logs/cron.log 2>&1
 ```
 
 Cấp quyền và chạy thử:
@@ -257,7 +250,7 @@ chmod +x run_cron.sh
 Mở `crontab -e` và thêm lịch chạy lúc **05:00 mỗi ngày theo timezone của VM**:
 
 ```cron
-0 5 * * * /home/khoa/Downloads/project1/run_cron.sh
+0 5,17 * * * /bin/bash /home/pmk20060311/YouTube-API-ETL-to-BigQuery/run_cron.sh  
 ```
 
 ## 9. Lưu ý
@@ -267,5 +260,3 @@ Mở `crontab -e` và thêm lịch chạy lúc **05:00 mỗi ngày theo timezone
 - Bình luận có thể bị thiếu hoặc trùng giữa các lần crawl nếu nội dung YouTube thay đổi trong lúc phân trang; bảng `comments` dùng MERGE để giảm trùng theo `comment_id`.
 - `raw_comments` dùng APPEND nên chạy lại có thể tạo thêm batch giống nhau; `raw_videos` ghi đè.
 - Không commit `.env`, Service Account JSON, `data/`, logs và `.venv/` lên GitHub.
-
-**Tài liệu:** [YouTube Data API](https://developers.google.com/youtube/v3/docs) · [BigQuery JSON](https://cloud.google.com/bigquery/docs/json-data) · [BigQuery Python Client](https://cloud.google.com/python/docs/reference/bigquery/latest)
